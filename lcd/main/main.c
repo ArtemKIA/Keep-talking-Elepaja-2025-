@@ -6,8 +6,11 @@
 #include "esp_log.h"
 #include "driver/adc.h"
 #include "driver/gpio.h"
+#include "control.h"
+
 
 /* ------------------ CONFIG ------------------ */
+/*
 #define Y_CHANNEL ADC1_CHANNEL_4  // GPIO34 on ESP32 || GPIO8 on ESP32-S3
 #define BUTTON    GPIO_NUM_9      // ESP32-S3 pin 46
 
@@ -15,31 +18,36 @@
 #define ADC_ATTEN ADC_ATTEN_DB_11
 #define DEADZONE  300
 #define SCROLL    2000
+*/
 
 #define I2C_BUS_PORT 0
-#define PIN_NUM_SDA 13
-#define PIN_NUM_SCL 14
+#define PIN_NUM_SDA 13 // On ESP32-S3 board 12
+#define PIN_NUM_SCL 14 // On ESP32-S3 board 13
 #define LCD_ADDRESS 0x3E
 #define RGB_ADDRESS 0x60
 #define I2C_MASTER_FREQ_HZ (50 * 1000)
 
-static const char *TAG = "MAIN";
+
+//static const char *TAG = "MAIN";
 
 /* ------------------ MENU ------------------ */
+
+
+static int game_time = 60; // default = 1 min
+static int difficulty = 0; // We have  0  ,   1     ,  2: See labels array
+const char *difficulty_labels[3] = {"Easy", "Medium", "Hard"};
+
 typedef enum {
     MENU_MAIN,
     MENU_PLAY,
     MENU_DIFFICULTY,
     MENU_TIME,
     MENU_OPTION5
-} menu_state_t;
+} menu_state_t; // enum for easy operation choosing in contril int
 
-typedef enum {
-    SCROLL_UP,
-    SCROLL_DOWN,
-    NO_SCROLL,
-    PRESS
-} joystick_event_t;
+static menu_state_t menu_state = MENU_MAIN; 
+static int current_index = 0; // Index for state of cursor in lcd that shows oprion like: >play
+static int top_index = 0; // Index for state of last option like
 
 #define MENU_ITEMS 5
 const char *menu[MENU_ITEMS] = {
@@ -48,30 +56,38 @@ const char *menu[MENU_ITEMS] = {
     "Time",
     "Option 5",
     "Exit"
-};
+}; // Creating THE meny of the game. For each item we have index that is used in joystick_task
 
-static menu_state_t menu_state = MENU_MAIN;
-static int current_index = 0;
-static int top_index = 0;
+/*
+typedef enum {
+    SCROLL_UP,
+    SCROLL_DOWN,
+    NO_SCROLL,
+    PRESS
+} joystick_event_t;
+*/
 
-static int game_time = 60; // default = 1 min
-static int difficulty = 0;
-const char *difficulty_labels[3] = {"Easy", "Medium", "Hard"};
+
 
 /* ------------------ I2C / LCD ------------------ */
+
 static i2c_master_bus_handle_t i2c_bus = NULL;
 static i2c_master_dev_handle_t lcd_dev_handle = NULL;
 static i2c_master_dev_handle_t rgb_dev_handle = NULL;
 
+
+
 /* ------------------ Helpers ------------------ */
-static void format_time(int seconds, char *buf, size_t len) {
+void format_time(int seconds, char *buf, size_t len) {
     int minutes = seconds / 60;
     int secs = seconds % 60;
     snprintf(buf, len, "%d:%02d", minutes, secs);
 }
 
+
+
 /* ------------------ Joystick ------------------ */
-void joystick_init(void) {
+/*void joystick_init(void) {
     adc1_config_width(ADC_WIDTH);
     adc1_config_channel_atten(Y_CHANNEL, ADC_ATTEN);
 
@@ -113,9 +129,10 @@ joystick_event_t joystick_read_event(void) {
 
     if (new_event == NO_SCROLL) last_event = NO_SCROLL;
     return NO_SCROLL;
-}
-
+ } 
+*/
 /* ------------------ I2C + Devices ------------------ */
+
 static esp_err_t i2c_init_bus(void) {
     if (i2c_bus) return ESP_OK;
 
@@ -160,6 +177,7 @@ static esp_err_t rgb_add_device_and_init(void) {
 }
 
 /* ------------------ LCD helpers ------------------ */
+
 static esp_err_t lcd_cmd(uint8_t cmd) {
     uint8_t buf[2] = {0x00, cmd};
     esp_err_t r = i2c_master_transmit(lcd_dev_handle, buf, 2, pdMS_TO_TICKS(100));
@@ -182,7 +200,10 @@ static void lcd_write_str(const char *str) {
     }
 }
 
+
 /* New: write full padded line */
+
+
 static void lcd_write_line(uint8_t row, const char *text) {
     char buf[17];
     snprintf(buf, sizeof(buf), "%-16s", text); // left align, pad spaces
@@ -214,7 +235,8 @@ static void lcd_render_menu(void) {
     }
 }
 
-/* ------------------ Menu Task ------------------ */
+/* ------------------ Menu Task ------------------ */ 
+
 void joystick_task(void *pvParameters) {
     joystick_init();
     lcd_render_menu();

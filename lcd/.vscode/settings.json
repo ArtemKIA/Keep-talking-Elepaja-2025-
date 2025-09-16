@@ -17,7 +17,10 @@
     "--compile-commands-dir=c:\\Users\\atemk\\Keep-talking-Elepaja-2025-\\lcd\\build"
   ],
   "files.associations": {
-    "i2c_master.h": "c"
+    "i2c_master.h": "c",
+    "adc.h": "c",
+    "control.h": "c",
+    "freertos.h": "c"
   },
   "idf.flashType": "UART"
 }
