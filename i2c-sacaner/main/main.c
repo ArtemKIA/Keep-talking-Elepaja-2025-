@@ -8,8 +8,16 @@
 #define APP_CPU_NUM PRO_CPU_NUM
 #endif
 
-#define SDA_PIN  6
-#define SCL_PIN  5
+// Change A and B for pin that you want to use as I2C
+// LOOK AT PIN MAP IN WED for you esp!!!
+
+// DO NOT CHOOSE: JTAG,RESET,BOOT,VSPI, 
+//ANY USB/JTAG: MTMS, MTDI, MTDO, MTCK
+//ANY DEBUG PIN THAT CAN BE IN FORM UORTS ot U1TXD
+//
+
+#define SDA_PIN  5
+#define SCL_PIN  6
 
 static const char *TAG = "i2cscanner";
 
