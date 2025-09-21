@@ -6,11 +6,10 @@
 #include "esp_log.h"
 #include "driver/adc.h"
 #include "driver/gpio.h"
-#include "control.h"
 
 
 /* ------------------ CONFIG ------------------ */
-/*
+
 #define Y_CHANNEL ADC1_CHANNEL_4  // GPIO34 on ESP32 || GPIO8 on ESP32-S3
 #define BUTTON    GPIO_NUM_9      // ESP32-S3 pin 46
 
@@ -18,7 +17,7 @@
 #define ADC_ATTEN ADC_ATTEN_DB_11
 #define DEADZONE  300
 #define SCROLL    2000
-*/
+
 
 #define I2C_BUS_PORT 0
 #define PIN_NUM_SDA 13 // On ESP32-S3 board 12
@@ -28,7 +27,7 @@
 #define I2C_MASTER_FREQ_HZ (50 * 1000)
 
 
-//static const char *TAG = "MAIN";
+static const char *TAG = "MAIN";
 
 /* ------------------ MENU ------------------ */
 
@@ -58,14 +57,14 @@ const char *menu[MENU_ITEMS] = {
     "Exit"
 }; // Creating THE meny of the game. For each item we have index that is used in joystick_task
 
-/*
+
 typedef enum {
     SCROLL_UP,
     SCROLL_DOWN,
     NO_SCROLL,
     PRESS
 } joystick_event_t;
-*/
+
 
 
 
@@ -87,7 +86,7 @@ void format_time(int seconds, char *buf, size_t len) {
 
 
 /* ------------------ Joystick ------------------ */
-/*void joystick_init(void) {
+void joystick_init(void) {
     adc1_config_width(ADC_WIDTH);
     adc1_config_channel_atten(Y_CHANNEL, ADC_ATTEN);
 
@@ -130,7 +129,7 @@ joystick_event_t joystick_read_event(void) {
     if (new_event == NO_SCROLL) last_event = NO_SCROLL;
     return NO_SCROLL;
  } 
-*/
+
 /* ------------------ I2C + Devices ------------------ */
 
 static esp_err_t i2c_init_bus(void) {
