@@ -11,13 +11,22 @@ U8G2_SH1107_SEEED_128X128_F_HW_I2C u8g2(
 
 // SETUP SETUP SETUP SETUP SETUP SETUP SETUP SETUP SETUP SETUP SETUP SETUP SETUP SETUP
 const int W = 128, H = 128; //Display dimension
-
 const int cy = 64;          //Vertical center line
 const float A = 40.0f;      //Amplitude
-static float k = 10.0f;            //Cycles across the 128px width
+static float k = 10.0f;     //Cycles across the 128px width
 const float phi = 0.0f;     //Phase for animation
 
-const int POT_K_PIN = 4;
+// TARGET VALUES
+const float K_TARGET_REF = 3.0f;   // number of cycles
+const float A_TARGET_REF = 40.0f;  // amplitude
+const float PHI_TARGET_REF = 0.0f; // phase
+// TARGET VALUES
+
+// ANALOGUE POT PINS USED
+const int POT_K_PIN      = 4;
+const int POT_A_PIN      = 5;
+const int POT_PHI_TARGET = 6;
+// ANALOGUE POT PINS USED
 
 static inline int X(int x) {return x;}
 static inline int Y(int y) {return y;}
@@ -33,9 +42,21 @@ void setup() {
 void loop() {
   u8g2.clearBuffer();
 
-  int raw = analogRead(POT_K_PIN);          // 0..4095
-  float k_target = 0.25f + (5.75f * raw / 4095.0f);  // 0.25 .. 6.0 cycles
-  k = 0.85f * k + 0.15f * k_target;         // low-pass so it doesn’t jitter
+  int raw = analogRead(POT_K_PIN);                    // 0..4095
+  float k_target = 0.25f + (5.75f * raw / 4095.0f);   // 0.25 .. 6.0 cycles
+  k = 0.85f * k + 0.15f * k_target;                   // low-pass so it doesn’t jitter
+
+  //  ---TARGET FUNCTION---
+  for (int x = 0; x < W; ++x) {
+    float theta_ref = 2.0f * PI * (K_TARGET_REF * x / (float)W) + PHI_TARGET_REF;
+    int y_ref = cy - (int)lrintf(A_TARGET_REF * sinf(theta_ref));
+
+    // Some skip for line to make it dotted
+    if (x % 3 == 0) {
+      u8g2.drawPixel(x, y_ref);
+    }
+  }
+  //   ---------------------
 
   int prevx = 0, prevy = cy;
   for (int x=0; x<128; ++x) {
