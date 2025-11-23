@@ -10,3 +10,8 @@ void game_update(void);                           // timer tick + 7seg + MCP but
 bool game_is_won(void);                           // MCP23017 LEDs pattern reached
 bool game_is_time_up(void);                       // timer expired
 void game_stop(void);
+void game_update_mistake_leds(int mistakes);
+
+void game_beep_mistake(void);
+void game_beep_win(void);
+void game_beep_fail(void);

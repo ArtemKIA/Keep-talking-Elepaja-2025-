@@ -10,3 +10,4 @@ void maze_update(void);
 void maze_stop(void);
 
 bool maze_is_finished(void);  // reached goal + button
+bool maze_poll_wall_hit(void);

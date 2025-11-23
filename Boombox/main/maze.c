@@ -10,6 +10,7 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_err.h"
+#include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
 
 
@@ -18,11 +19,11 @@
 #define MATRIX_BRIGHT        1       // 0..15
 #define I2C_SPEED_HZ         50000   // 50 kHz
 
-// Joystick: ADC1 channels (ESP32-S3) — GPIO4 -> CH3, GPIO5 -> CH4
+// Joystick: ADC1 channels (ESP32-S3) — GPIO1 -> CH0, GPIO2 -> CH1
 #define JOY_ADC_UNIT         ADC_UNIT_1
-#define JOY_VRX_CH           ADC_CHANNEL_3
-#define JOY_VRY_CH           ADC_CHANNEL_4
-#define JOY_SW_PIN           GPIO_NUM_6   // joystick/button (active low, pull-up)
+#define JOY_VRX_CH           ADC_CHANNEL_0
+#define JOY_VRY_CH           ADC_CHANNEL_1
+#define JOY_SW_PIN           GPIO_NUM_3   // joystick/button (active low, pull-up)
 
 // Movement tuning
 #define MOVE_COOLDOWN_MS     200
@@ -37,6 +38,9 @@ static i2c_master_dev_handle_t  s_ht16k33 = NULL;
 static adc_oneshot_unit_handle_t s_adc_unit = NULL;
 
 static uint8_t s_ht16k33_addr = 0x70;
+
+static const char *TAG = "MAZE";
+static bool s_wallHitPending = false;
 
 /* Maze data: 1 = wall, 0 = free */
 static uint8_t s_maze[8][8] = {
@@ -100,26 +104,19 @@ static inline bool inBounds(int x, int y) {
 
 /* ========= LOW-LEVEL HELPERS ========= */
 static bool ht16k33_probe_and_init(void) {
-    for (uint8_t addr = 0x70; addr <= 0x77; addr++) {
-        if (i2c_master_probe(s_bus, addr, 50) == ESP_OK) {
-            s_ht16k33_addr = addr;
-
-            i2c_device_config_t dev_cfg = {
+    i2c_device_config_t dev_cfg = {
                 .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                 .device_address  = s_ht16k33_addr,
                 .scl_speed_hz    = I2C_SPEED_HZ,
             };
-            ESP_ERROR_CHECK(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_ht16k33));
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_ht16k33));
 
-            uint8_t cmd;
-            cmd = 0x21;  ESP_ERROR_CHECK(i2c_master_transmit(s_ht16k33, &cmd, 1, -1)); // oscillator on
-            cmd = 0x81;  ESP_ERROR_CHECK(i2c_master_transmit(s_ht16k33, &cmd, 1, -1)); // display on
-            cmd = (uint8_t)(0xE0 | (MATRIX_BRIGHT & 0x0F));
-            ESP_ERROR_CHECK(i2c_master_transmit(s_ht16k33, &cmd, 1, -1));              // brightness
-            return true;
-        }
-    }
-    return false;
+    uint8_t cmd;
+    cmd = 0x21;  ESP_ERROR_CHECK(i2c_master_transmit(s_ht16k33, &cmd, 1, -1)); // oscillator on
+    cmd = 0x81;  ESP_ERROR_CHECK(i2c_master_transmit(s_ht16k33, &cmd, 1, -1)); // display on
+    cmd = (uint8_t)(0xE0 | (MATRIX_BRIGHT & 0x0F));
+    ESP_ERROR_CHECK(i2c_master_transmit(s_ht16k33, &cmd, 1, -1));              // brightness
+    return true;
 }
 
 
@@ -186,11 +183,16 @@ static void maze_initGoal(void) {
 static void maze_tryMove(int dx, int dy) {
     int nx = s_playerX + dx;
     int ny = s_playerY + dy;
-    if (!inBounds(nx, ny)) return;
-    if (s_maze[ny][nx] == 0) {
-        s_playerX = nx;
-        s_playerY = ny;
+
+    // Out of bounds OR wall = wall-hit event
+    if (!inBounds(nx, ny) || s_maze[ny][nx] != 0) {
+        s_wallHitPending = true;
+        return;
     }
+
+    // Valid move
+    s_playerX = nx;
+    s_playerY = ny;
 }
 
 static int maze_endCondition(void) {
@@ -242,6 +244,8 @@ void maze_init(i2c_master_bus_handle_t bus) {
 
     s_maze_running  = false;
     s_maze_finished = false;
+
+    ESP_LOGI(TAG, "HT16K33 device added");
 }
 
 void maze_start(void) {
@@ -259,6 +263,8 @@ void maze_start(void) {
 
     s_maze_finished = false;
     s_maze_running  = true;
+
+    s_wallHitPending = false;
 
     ht16k33_clear();
     maze_drawScene();
@@ -306,8 +312,18 @@ void maze_update(void) {
 void maze_stop(void) {
     s_maze_running = false;
     ht16k33_clear();
+    s_wallHitPending = false;
 }
 
 bool maze_is_finished(void) {
     return s_maze_finished;
+}
+
+bool maze_poll_wall_hit(void)
+{
+    if (s_wallHitPending) {
+        s_wallHitPending = false;  // one-shot
+        return true;
+    }
+    return false;
 }

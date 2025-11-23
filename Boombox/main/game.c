@@ -280,4 +280,48 @@ bool game_is_time_up(void) {
 void game_stop(void) {
     s_game_running = false;
     buzzer_off();
+
+    if (s_mcp_dev != NULL) {
+        mcp_write_reg(GPIOA, 0x00);   // force LEDs off
+    }
+}
+
+void game_update_mistake_leds(int mistakes)
+{
+    if (s_mcp_dev == NULL) return;
+
+    uint8_t val = 0;
+
+    if (mistakes >= 1) val |= (1 << 0);
+    if (mistakes >= 2) val |= (1 << 1);
+    if (mistakes >= 3) val |= (1 << 2);
+
+    mcp_write_reg(GPIOA, val);
+}
+
+void game_beep_mistake(void)
+{
+    buzzer_on();
+    vTaskDelay(pdMS_TO_TICKS(120));
+    buzzer_off();
+}
+
+void game_beep_win(void)
+{
+    // two short beeps
+    buzzer_on();
+    vTaskDelay(pdMS_TO_TICKS(120));
+    buzzer_off();
+    vTaskDelay(pdMS_TO_TICKS(120));
+    buzzer_on();
+    vTaskDelay(pdMS_TO_TICKS(200));
+    buzzer_off();
+}
+
+void game_beep_fail(void)
+{
+    // one long low beep
+    buzzer_on();
+    vTaskDelay(pdMS_TO_TICKS(400));
+    buzzer_off();
 }

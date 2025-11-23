@@ -2,23 +2,61 @@
 
 #include <stdio.h>
 #include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_err.h"
+#include "rom/ets_sys.h"
 
 static const char *TAG = "MENU";
 
-/* I2C addresses */
-#define LCD_ADDRESS 0x3E
-#define RGB_ADDRESS 0x60
-#define I2C_MASTER_FREQ_HZ (50*1000)
+/* ============================================================
+ *                    I2C + LCD DEFINES
+ * ============================================================ */
 
-/* Buttons (active low, pull-up) */
+#define I2C_MASTER_FREQ_HZ   (50 * 1000)
+
+/* PCF8574 backpack mapping as in ControllersTech article:
+ *
+ * P0 -> RS
+ * P1 -> RW
+ * P2 -> EN
+ * P3 -> Backlight
+ * P4 -> D4
+ * P5 -> D5
+ * P6 -> D6
+ * P7 -> D7
+ */
+
+#define LCD_ADDR_DEFAULT 0x27
+
+#define LCD_PIN_RS  0x01  // P0
+#define LCD_PIN_RW  0x02  // P1
+#define LCD_PIN_EN  0x04  // P2
+#define LCD_PIN_BL  0x08  // P3
+
+/* ============================================================
+ *                    BUTTON DEFINES
+ * ============================================================ */
+
+/* reuse original GPIOs for the 3-button input */
 #define BUTTON_UP    GPIO_NUM_5
 #define BUTTON_SEL   GPIO_NUM_6
 #define BUTTON_DOWN  GPIO_NUM_7
+
+typedef enum {
+    EV_SCROLL_UP,
+    EV_SCROLL_DOWN,
+    EV_NONE,
+    EV_PRESS
+} btn_event_t;
+
+/* ============================================================
+ *                    MENU STATE
+ * ============================================================ */
 
 typedef enum {
     MENU_STATE_MAIN,
@@ -29,108 +67,233 @@ typedef enum {
 
 #define MENU_ITEMS 5
 static const char *s_menu_items[MENU_ITEMS] = {
-    "Play", "Difficulty", "Time", "Option 5", "Exit"
+    "Play",
+    "Difficulty",
+    "Time",
+    "Option 5",
+    "Exit"
 };
 
-static const char *s_diff_labels[3] = {"Easy", "Medium", "Hard"};
+static const char *s_diff_labels[3] = {
+    "Easy",
+    "Medium",
+    "Hard"
+};
 
-/* Internal state */
+/* I2C + LCD state */
 static i2c_master_bus_handle_t s_bus = NULL;
 static i2c_master_dev_handle_t s_lcd = NULL;
-static i2c_master_dev_handle_t s_rgb = NULL;
+static uint8_t s_backlight_mask = LCD_PIN_BL;
 
+/* Menu state */
 static menu_state_t s_state = MENU_STATE_MAIN;
-static int s_current_index = 0;
-static int s_top_index     = 0;
+static int  s_current_index   = 0;
+static int  s_top_index       = 0;
 
-static int  s_game_time    = 60;   // seconds
-static int  s_difficulty    = 0;   // 0..2
+static int  s_game_time       = 60;   // seconds
+static int  s_difficulty      = 0;    // 0..2
+static bool s_running         = false;
+static bool s_req_start_game  = false;
 
-static bool s_running            = false;
-static bool s_req_start_game     = false;
+/* If LCD init failed, skip all I2C writes to avoid constant errors. */
+static bool s_lcd_ok = false;
 
-/* ========== Low-level LCD helpers ========== */
-static esp_err_t lcd_add_device(void) {
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = LCD_ADDRESS,
-        .scl_speed_hz    = I2C_MASTER_FREQ_HZ,
-    };
-    return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_lcd);
+/* ============================================================
+ *                 LOW-LEVEL LCD VIA PCF8574
+ * ============================================================ */
+
+static esp_err_t lcd_write_raw(uint8_t v)
+{
+    if (!s_lcd_ok || s_lcd == NULL) {
+        return ESP_FAIL;
+    }
+    return i2c_master_transmit(s_lcd, &v, 1, -1);
 }
 
-static esp_err_t rgb_add_device_and_init(void) {
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = RGB_ADDRESS,
-        .scl_speed_hz    = I2C_MASTER_FREQ_HZ,
-    };
-    esp_err_t r = i2c_master_bus_add_device(s_bus, &dev_cfg, &s_rgb);
-    if (r != ESP_OK) return r;
+/* Send a 4-bit nibble (lower 4 bits) with control signals */
+static esp_err_t lcd_send_nibble(uint8_t nibble, uint8_t rs_flag)
+{
+    if (!s_lcd_ok || s_lcd == NULL) {
+        return ESP_FAIL;
+    }
 
-    uint8_t init_data[][2] = {
-        {0x80, 0x01},{0x81, 0x14},{0x82, 0xFF},
-        {0x83, 0xFF},{0x84, 0xFF},{0x85, 0x20}
-    };
-    for (size_t i = 0; i < sizeof(init_data)/sizeof(init_data[0]); i++) {
-        i2c_master_transmit(s_rgb, init_data[i], 2, pdMS_TO_TICKS(100));
-        vTaskDelay(pdMS_TO_TICKS(10));
+    nibble &= 0x0F;
+
+    uint8_t out = 0;
+
+    // D4..D7 on P4..P7
+    out |= (nibble << 4);
+
+    // Backlight
+    out |= s_backlight_mask;
+
+    // RS (RW always 0 = write)
+    if (rs_flag) {
+        out |= LCD_PIN_RS;
+    }
+
+    // Force RW low (write only)
+    // RW is on P1 but we never read busy flag, only use delays
+    out &= (uint8_t)~LCD_PIN_RW;
+
+    esp_err_t err;
+
+    // EN high
+    err = lcd_write_raw(out | LCD_PIN_EN);
+    if (err != ESP_OK) return err;
+    // give LCD time to latch via PCF8574 + I2C
+    ets_delay_us(600);   // was 1 us
+
+    // EN low (latch)
+    err = lcd_write_raw(out & (uint8_t)~LCD_PIN_EN);
+    if (err != ESP_OK) return err;
+    ets_delay_us(600);   // was 50 us
+
+    return ESP_OK;
+}
+
+
+static esp_err_t lcd_send_byte(uint8_t value, bool is_data)
+{
+    esp_err_t err;
+
+    err = lcd_send_nibble((value >> 4) & 0x0F, is_data);
+    if (err != ESP_OK) return err;
+
+    err = lcd_send_nibble(value & 0x0F, is_data);
+    if (err != ESP_OK) return err;
+
+    ets_delay_us(50);
+    return ESP_OK;
+}
+
+static inline esp_err_t lcd_cmd(uint8_t cmd)
+{
+    esp_err_t err = lcd_send_byte(cmd, false);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (cmd == 0x01 || cmd == 0x02) {
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
     return ESP_OK;
 }
 
-static esp_err_t lcd_cmd(uint8_t cmd) {
-    uint8_t buf[2] = {0x00, cmd};
-    esp_err_t r = i2c_master_transmit(s_lcd, buf, 2, pdMS_TO_TICKS(100));
-    if (r == ESP_OK) {
-        if (cmd == 0x01 || cmd == 0x02)
-            vTaskDelay(pdMS_TO_TICKS(5));
-        else
-            vTaskDelay(pdMS_TO_TICKS(2));
-    }
-    return r;
+static inline esp_err_t lcd_data(uint8_t data)
+{
+    return lcd_send_byte(data, true);
 }
 
-static esp_err_t lcd_data(uint8_t data) {
-    uint8_t buf[2] = {0x40, data};
-    return i2c_master_transmit(s_lcd, buf, 2, pdMS_TO_TICKS(100));
-}
-
-static void lcd_write_str(const char *str) {
-    while (*str) {
-        lcd_data((uint8_t)*str++);
-        vTaskDelay(pdMS_TO_TICKS(10));
+static void lcd_write_str(const char *s)
+{
+    if (!s_lcd_ok) return;
+    while (*s) {
+        lcd_data((uint8_t)*s++);
     }
 }
 
-static void lcd_write_line_internal(uint8_t row, const char *text) {
+static void lcd_write_line_internal(uint8_t row, const char *text)
+{
+    if (!s_lcd_ok) return;
+
     char buf[17];
-    snprintf(buf, sizeof(buf), "%-16s", text);
-    uint8_t addr = (row == 0 ? 0x00 : 0x40);
+    if (text) {
+        snprintf(buf, sizeof(buf), "%-16s", text);
+    } else {
+        snprintf(buf, sizeof(buf), "%-16s", "");
+    }
+
+    uint8_t addr = (row == 0) ? 0x00 : 0x40; // HD44780 DDRAM
     lcd_cmd(0x80 | addr);
     lcd_write_str(buf);
 }
 
-static esp_err_t lcd_init_display(void) {
+/* Safer HD44780 4-bit init sequence, mirroring Arduino libs */
+static esp_err_t lcd_init_display(void)
+{
+    if (s_lcd == NULL) {
+        ESP_LOGE(TAG, "lcd_init_display called with NULL device");
+        return ESP_FAIL;
+    }
+
+    // power-on delay
     vTaskDelay(pdMS_TO_TICKS(50));
-    lcd_cmd(0x38); lcd_cmd(0x39); lcd_cmd(0x14);
-    lcd_cmd(0x70 | 0x0F); lcd_cmd(0x5C); lcd_cmd(0x6C);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    lcd_cmd(0x38); lcd_cmd(0x0C); lcd_cmd(0x01);
-    ESP_LOGI(TAG, "LCD initialised");
+
+    esp_err_t err;
+
+    // put expander into a known state: backlight on, everything else low
+    uint8_t base = s_backlight_mask;
+    err = lcd_write_raw(base);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    // 3x 0x03 to force 8-bit mode
+    err = lcd_send_nibble(0x03, false);
+    if (err != ESP_OK) return err;
+    ets_delay_us(4500);
+
+    err = lcd_send_nibble(0x03, false);
+    if (err != ESP_OK) return err;
+    ets_delay_us(4500);
+
+    err = lcd_send_nibble(0x03, false);
+    if (err != ESP_OK) return err;
+    ets_delay_us(150);
+
+    // 0x02 to switch to 4-bit mode
+    err = lcd_send_nibble(0x02, false);
+    if (err != ESP_OK) return err;
+    ets_delay_us(150);
+
+    // Function set: 4-bit, 2 line, 5x8 dots
+    ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_cmd(0x28));
+    // Display on, cursor off, blink off
+    ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_cmd(0x0C));
+    // Clear display
+    ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_cmd(0x01));
+    vTaskDelay(pdMS_TO_TICKS(2));
+    // Entry mode: increment, no shift
+    ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_cmd(0x06));
+
+    ESP_LOGI(TAG, "LCD initialised (1602 I2C backpack, PCF8574T)");
     return ESP_OK;
 }
 
-/* ========== Buttons ========== */
+static esp_err_t lcd_add_device(void)
+{
+    i2c_device_config_t cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = LCD_ADDR_DEFAULT,   // 0x27
+        .scl_speed_hz    = I2C_MASTER_FREQ_HZ,
+    };
 
-typedef enum {
-    EV_SCROLL_UP,
-    EV_SCROLL_DOWN,
-    EV_NONE,
-    EV_PRESS
-} btn_event_t;
+    esp_err_t err = i2c_master_bus_add_device(s_bus, &cfg, &s_lcd);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add LCD device: %s", esp_err_to_name(err));
+        return err;
+    }
 
-static void buttons_init(void) {
+    // Quick probe: just backlight bit
+    uint8_t test = s_backlight_mask;
+    err = i2c_master_transmit(s_lcd, &test, 1, -1);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "LCD probe failed at 0x%02X: %s",
+                 LCD_ADDR_DEFAULT, esp_err_to_name(err));
+        s_lcd_ok = false;
+        return err;
+    }
+
+    ESP_LOGI(TAG, "LCD: device added at 0x%02X", LCD_ADDR_DEFAULT);
+    s_lcd_ok = true;
+    return ESP_OK;
+}
+
+/* ============================================================
+ *                       BUTTONS
+ * ============================================================ */
+
+static void buttons_init(void)
+{
     gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << BUTTON_UP) |
                         (1ULL << BUTTON_SEL) |
@@ -138,43 +301,52 @@ static void buttons_init(void) {
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&cfg);
 }
 
-static btn_event_t buttons_read_event(void) {
+static btn_event_t buttons_read_event(void)
+{
     static int last_up = 1, last_sel = 1, last_down = 1;
+
     int up   = gpio_get_level(BUTTON_UP);
     int sel  = gpio_get_level(BUTTON_SEL);
     int down = gpio_get_level(BUTTON_DOWN);
 
-    if (up == 0 || sel == 0 || down == 0) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        up   = gpio_get_level(BUTTON_UP);
-        sel  = gpio_get_level(BUTTON_SEL);
-        down = gpio_get_level(BUTTON_DOWN);
+    if (sel == 0 && last_sel == 1) {
+        last_sel = 0;
+        return EV_PRESS;
+    }
+    if (up == 0 && last_up == 1) {
+        last_up = 0;
+        return EV_SCROLL_UP;
+    }
+    if (down == 0 && last_down == 1) {
+        last_down = 0;
+        return EV_SCROLL_DOWN;
     }
 
-    if (sel == 0 && last_sel == 1) { last_sel = 0; return EV_PRESS; }
-    if (up  == 0 && last_up  == 1) { last_up  = 0; return EV_SCROLL_UP; }
-    if (down== 0 && last_down== 1){ last_down= 0; return EV_SCROLL_DOWN; }
-
-    if (sel == 1 && last_sel == 0)   last_sel  = 1;
-    if (up  == 1 && last_up  == 0)   last_up   = 1;
-    if (down== 1 && last_down== 0)   last_down = 1;
+    if (sel == 1)  last_sel  = 1;
+    if (up == 1)   last_up   = 1;
+    if (down == 1) last_down = 1;
 
     return EV_NONE;
 }
 
-/* ========== Menu drawing ========== */
+/* ============================================================
+ *                      MENU DRAWING
+ * ============================================================ */
 
-static void menu_draw_list(void) {
-    char line0[17], line1[17];
+static void menu_draw_list(void)
+{
+    char line0[17];
+    char line1[17];
 
     snprintf(line0, sizeof(line0), "%c%s",
              (s_top_index == s_current_index) ? '>' : ' ',
              s_menu_items[s_top_index]);
+
     lcd_write_line_internal(0, line0);
 
     if (s_top_index + 1 < MENU_ITEMS) {
@@ -187,39 +359,52 @@ static void menu_draw_list(void) {
     }
 }
 
-/* ========== Public API ========== */
+/* ============================================================
+ *                    PUBLIC API
+ * ============================================================ */
 
-void menu_init(i2c_master_bus_handle_t bus) {
+void menu_init(i2c_master_bus_handle_t bus)
+{
     s_bus = bus;
-    ESP_ERROR_CHECK(lcd_add_device());
-    ESP_ERROR_CHECK(rgb_add_device_and_init());
-    ESP_ERROR_CHECK(lcd_init_display());
+
+    esp_err_t err = lcd_add_device();
+    if (err != ESP_OK) {
+        s_lcd_ok = false;
+        ESP_LOGE(TAG, "LCD add device failed, menu will run headless");
+    } else {
+        err = lcd_init_display();
+        if (err != ESP_OK) {
+            s_lcd_ok = false;
+            ESP_LOGE(TAG, "LCD init failed: %s", esp_err_to_name(err));
+        }
+    }
+
     buttons_init();
- 
+
     s_state = MENU_STATE_MAIN;
-    s_current_index = 0;
-    s_top_index = 0;
-    s_game_time = 60;
-    s_difficulty = 0;
-    s_req_start_game = false;
-    s_running = false;
 }
 
-void menu_enter(void) {
-    s_state = MENU_STATE_MAIN;
-    s_current_index = 0;
-    s_top_index = 0;
+void menu_enter(void)
+{
+    s_state          = MENU_STATE_MAIN;
+    s_current_index  = 0;
+    s_top_index      = 0;
     s_req_start_game = false;
-    s_running = true;
+    s_running        = true;
+
     menu_draw_list();
 }
 
-void menu_leave(void) {
+void menu_leave(void)
+{
     s_running = false;
 }
 
-void menu_update(void) {
-    if (!s_running) return;
+void menu_update(void)
+{
+    if (!s_running) {
+        return;
+    }
 
     btn_event_t ev = buttons_read_event();
 
@@ -227,17 +412,21 @@ void menu_update(void) {
     case MENU_STATE_MAIN:
         if (ev == EV_SCROLL_UP && s_current_index > 0) {
             s_current_index--;
-            if (s_current_index < s_top_index) s_top_index--;
+            if (s_current_index < s_top_index) {
+                s_top_index--;
+            }
             menu_draw_list();
         } else if (ev == EV_SCROLL_DOWN && s_current_index < MENU_ITEMS - 1) {
             s_current_index++;
-            if (s_current_index > s_top_index + 1) s_top_index++;
+            if (s_current_index > s_top_index + 1) {
+                s_top_index++;
+            }
             menu_draw_list();
         } else if (ev == EV_PRESS) {
             if (s_current_index == 0) {
-                // Play
+                /* Play */
                 s_req_start_game = true;
-                s_running = false;  // main will switch to game
+                s_running = false;
             } else if (s_current_index == 1) {
                 s_state = MENU_STATE_DIFFICULTY;
             } else if (s_current_index == 2) {
@@ -253,29 +442,36 @@ void menu_update(void) {
         break;
 
     case MENU_STATE_DIFFICULTY:
-        if (ev == EV_SCROLL_UP && s_difficulty < 2)      s_difficulty++;
-        else if (ev == EV_SCROLL_DOWN && s_difficulty>0) s_difficulty--;
-        else if (ev == EV_PRESS) {
+        if (ev == EV_SCROLL_UP && s_difficulty < 2) {
+            s_difficulty++;
+        } else if (ev == EV_SCROLL_DOWN && s_difficulty > 0) {
+            s_difficulty--;
+        } else if (ev == EV_PRESS) {
             s_state = MENU_STATE_MAIN;
             menu_draw_list();
             break;
         }
+
         lcd_write_line_internal(0, "Difficulty:");
         lcd_write_line_internal(1, s_diff_labels[s_difficulty]);
         break;
 
     case MENU_STATE_TIME:
-        if (ev == EV_SCROLL_UP && s_game_time < 60*300) s_game_time += 30;
-        else if (ev == EV_SCROLL_DOWN && s_game_time > 30) s_game_time -= 30;
-        else if (ev == EV_PRESS) {
+        if (ev == EV_SCROLL_UP && s_game_time < 60 * 300) {
+            s_game_time += 30;
+        } else if (ev == EV_SCROLL_DOWN && s_game_time > 30) {
+            s_game_time -= 30;
+        } else if (ev == EV_PRESS) {
             s_state = MENU_STATE_MAIN;
             menu_draw_list();
             break;
-        } else {
+        }
+
+        {
             char buf[16];
-            int minutes = s_game_time / 60;
-            int secs    = s_game_time % 60;
-            snprintf(buf, sizeof(buf), "%d:%02d", minutes, secs);
+            snprintf(buf, sizeof(buf), "%d:%02d",
+                     s_game_time / 60,
+                     s_game_time % 60);
             lcd_write_line_internal(0, "Set Time:");
             lcd_write_line_internal(1, buf);
         }
@@ -296,21 +492,25 @@ void menu_update(void) {
     }
 }
 
-bool menu_request_start_game(void) {
+bool menu_request_start_game(void)
+{
     bool r = s_req_start_game;
     s_req_start_game = false;
     return r;
 }
 
-int menu_get_game_time(void) {
+int menu_get_game_time(void)
+{
     return s_game_time;
 }
 
-int menu_get_difficulty(void) {
+int menu_get_difficulty(void)
+{
     return s_difficulty;
 }
 
-void menu_show_status(const char *line0, const char *line1) {
+void menu_show_status(const char *line0, const char *line1)
+{
     lcd_write_line_internal(0, line0);
     lcd_write_line_internal(1, line1);
 }
