@@ -16,6 +16,3 @@ void game_update_mistake_leds(int mistakes);
 void game_beep_mistake(void);
 void game_beep_win(void);
 void game_beep_fail(void);
-
-/* NEW: enable the button game only when we actually want to play it */
-void game_enable_buttons(void);
