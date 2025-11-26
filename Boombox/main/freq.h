@@ -1,12 +1,14 @@
-// freq.h
 #pragma once
 
 #include <stdbool.h>
+#include "driver/i2c_master.h"
 
-void freq_init(void);                          // init SPI OLED + ADC for K pot
-void freq_start(void);                         // reset state, start drawing
-void freq_update(void);                        // read pot + redraw frame
-void freq_stop(void);
+// 0.96" I2C OLED (SSD1306 128x64) + 3 pots on GPIO15/16/17 (ADC2)
+// P1 = amplitude, P2 = period/frequency, P3 = noise amount
 
-bool freq_is_matched(void);                    // k close enough to target
-void freq_start_task(void);
+void freq_init(i2c_master_bus_handle_t bus);  // pass bus1 handle
+void freq_start(void);                        // reset state, start drawing
+void freq_update(void);                       // read pots + redraw frame
+void freq_stop(void);                         // stop updating
+
+bool freq_is_matched(void);                   // k close enough to target

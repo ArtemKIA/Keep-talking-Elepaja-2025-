@@ -3,7 +3,6 @@
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
-#include "freertos/task.h"
 
 #include "maze.h"
 #include "menu.h"
@@ -14,7 +13,7 @@ static const char *TAG = "MAIN";
 
 /* I2C bus config */
 #define BUS0_PORT   0    // LCD + RGB + HT16K33 (maze)
-#define BUS1_PORT   1    // MCP23017
+#define BUS1_PORT   1    // MCP23017 + SSD1306
 #define SDA0_PIN    13
 #define SCL0_PIN    14
 #define SDA1_PIN    48
@@ -30,16 +29,20 @@ typedef enum {
 
 static app_state_t s_state = APP_STATE_MENU;
 
-static int s_mistakes = 0;
+static int  s_mistakes        = 0;
 static const int MAX_MISTAKES = 3;
 
-static void i2c_init_buses(void) {
+static bool s_maze_done = false;
+static bool s_freq_done = false;
+
+static void i2c_init_buses(void)
+{
     i2c_master_bus_config_t bus0_cfg = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port   = BUS0_PORT,
         .sda_io_num = SDA0_PIN,
         .scl_io_num = SCL0_PIN,
-        .flags = {.enable_internal_pullup = true},
+        .flags = { .enable_internal_pullup = true },
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus0_cfg, &s_bus0));
 
@@ -48,26 +51,24 @@ static void i2c_init_buses(void) {
         .i2c_port   = BUS1_PORT,
         .sda_io_num = SDA1_PIN,
         .scl_io_num = SCL1_PIN,
-        .flags = {.enable_internal_pullup = true},
+        .flags = { .enable_internal_pullup = true },
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus1_cfg, &s_bus1));
 }
 
-void app_main(void) {
-    ESP_LOGI(TAG, "Starting modular app (menu + maze + game)");
+void app_main(void)
+{
+    ESP_LOGI(TAG, "Starting modular app (menu + maze + freq + button game)");
 
     i2c_init_buses();
 
-    // init modules
+    /* init modules */
     menu_init(s_bus0);    // LCD + RGB
     maze_init(s_bus0);    // HT16K33 + joystick ADC
-    //freq_init();           // SPI OLED + K pot on GPIO15
-    game_init(s_bus0);    // MCP23017 + 7seg + buzzer
+    freq_init(s_bus1);    // I2C OLED (SSD1306 128x64) on bus1 + pots
+    game_init(s_bus1);    // MCP23017 + 7seg + buzzer + Button Game
 
-    // start freq background task once
-    //freq_start_task();
-
-    // enter menu
+    /* enter menu */
     menu_enter();
     s_state = APP_STATE_MENU;
 
@@ -80,31 +81,40 @@ void app_main(void) {
                 int game_time = menu_get_game_time();
 
                 maze_start();
-                //freq_start();          // enable freq in background task
+                freq_start();
                 game_start(game_time);
 
-                s_mistakes = 0;
+                s_mistakes  = 0;
+                s_maze_done = false;
+                s_freq_done = false;
 
-                menu_show_status("Maze Running", "Use Joystick");
+                menu_show_status("Time is running", "Do or Die!");
                 s_state = APP_STATE_GAME;
             }
             break;
 
         case APP_STATE_GAME:
-            maze_update();
-            game_update();
+            /* update active modules */
+            if (!s_maze_done) {
+                maze_update();
+            }
+            if (!s_freq_done) {
+                freq_update();     // ensure OLED updates each frame
+            }
+            game_update();         // timer + Button Game
 
-            if (maze_poll_wall_hit()) {
+            /* wall hits + button mistakes share the same life counter */
+            if (maze_poll_wall_hit() || button_mistake_done()) {
                 s_mistakes++;
 
                 game_update_mistake_leds(s_mistakes);
-                game_beep_mistake(); 
+                game_beep_mistake();
 
                 if (s_mistakes >= MAX_MISTAKES) {
                     game_beep_fail();
                     game_stop();
                     maze_stop();
-                    //freq_stop();       
+                    freq_stop();
                     menu_show_status("Too many hits", "Game Over");
                     vTaskDelay(pdMS_TO_TICKS(2000));
 
@@ -114,11 +124,26 @@ void app_main(void) {
                 }
             }
 
-            if (maze_is_finished() /*|| freq_is_matched()*/) {
-                game_beep_win();
+            /* per-module wins */
+
+            if (!s_maze_done && maze_is_finished()) {
+                s_maze_done = true;
+                game_beep_win();          // maze win sound
+                maze_stop();              // stop maze hardware
+                menu_show_status("Maze done", "Match the wave");
+            }
+
+            if (!s_freq_done && freq_is_matched()) {
+                s_freq_done = true;
+                game_beep_win();          // freq win sound
+                freq_stop();              // stop OLED + ADC
+                menu_show_status("Wave matched", "Play buttons");
+            }
+
+            /* overall win: maze + freq + Button Game */
+            if (s_maze_done && s_freq_done && game_is_won()) {
+                game_beep_win();          // final win sound
                 game_stop();
-                maze_stop();
-                //freq_stop();
                 menu_show_status("You Win!", "Congratulations!");
                 vTaskDelay(pdMS_TO_TICKS(2000));
 
@@ -126,9 +151,11 @@ void app_main(void) {
                 s_state = APP_STATE_MENU;
 
             } else if (game_is_time_up()) {
+                /* timeout: fail beep + stop everything */
+                game_beep_fail();
                 game_stop();
                 maze_stop();
-                //freq_stop();
+                freq_stop();
                 menu_show_status("Time's up!", "Game Over");
                 vTaskDelay(pdMS_TO_TICKS(2000));
 
