@@ -1,12 +1,2 @@
 # Keep-talking-Elepaja-2025-
-Repository for group project based on famous puzzel co-op game Keep Talking and Nobody Explodes
-ВНИМАНИЕ ВНИМАНИЕ  ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ 
-ВНИМАНИЕ ВНИМАНИЕ  ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ 
-!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-ВНИМАНИЕ ВНИМАНИЕ  ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ ВНИМАНИЕ 
-
-Весь код для проекта отдельно надо копировать С этой РЕПАЗИТОРИИ в на ВАШ компьютер так чтобы 
-НА ВАШЕМ VScode вы УЖЕ сделали проект через NEW PROJECT WIZARD в EPS-IDF 
-В  NEW PROJECT WIZARD выбирате в CHOOSE TAMPLATE TEMPLATE-APP что являктся пусто директорию с нужными кофигами
+ Tämä projekti on toteutettu kurssille Elepaja 2025 ja perustuu tunnetuun yhteistyöpeliin Keep Talking and Nobody Explodes. Peli on alkuperäisen pelin mukainen pulmapeli, jossa pelaajan tulee ohjeiden mukaan purkaa pommi ennen aikarajan loppumista. Tämä toteutus on suunniteltu ESP32-S3 -mikrokontrollerille ja sisältää useita eri näyttökomponentteja interaktiivista kokemusta varten.
